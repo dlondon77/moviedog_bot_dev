@@ -2,6 +2,7 @@
 import os
 import re
 import json
+import base64
 import httpx
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,22 +21,36 @@ httpx.AsyncClient.__init__ = patched_init
 TOKEN = os.environ.get('CARD_BOT_TOKEN')
 DEEPSEEK_API_KEY = os.environ.get('OPENAI_API_KEY')
 
-if not TOKEN:
-    print("❌ Ошибка: переменная CARD_BOT_TOKEN не установлена")
-    exit(1)
-if not DEEPSEEK_API_KEY:
-    print("❌ Ошибка: переменная OPENAI_API_KEY не установлена")
+if not TOKEN or not DEEPSEEK_API_KEY:
+    print("❌ Ошибка: установите CARD_BOT_TOKEN и OPENAI_API_KEY")
     exit(1)
 
 print(f"✅ Токен: {TOKEN[:10]}...")
 print(f"✅ API Key: {DEEPSEEK_API_KEY[:10]}...")
 
+# ==================== ПУТИ ====================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRAMES_DIR = os.path.join(BASE_DIR, 'frames')
+OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
+TEMPLATES_DIR = os.path.join(BASE_DIR, 'templates')
+
+os.makedirs(FRAMES_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(TEMPLATES_DIR, exist_ok=True)
+
 # ==================== СОСТОЯНИЯ ====================
-WAITING_FOR_FILM, WAITING_FOR_OPINION = range(2)
+WAITING_FOR_FILM, WAITING_FOR_OPINION, WAITING_FOR_FRAMES = range(3)
 
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# ==================== ФУНКЦИИ ПАРСИНГА ====================
+# ==================== ФУНКЦИИ ====================
+
+def get_template():
+    """Читает шаблон из файла"""
+    template_path = os.path.join(TEMPLATES_DIR, 'opinion.html')
+    with open(template_path, 'r', encoding='utf-8') as f:
+        return f.read()
+
 def parse_film_text(text):
     result = {"title": "", "year": "", "country": "", "director": "", "actors": ""}
     lines = text.strip().split('\n')
@@ -82,15 +97,10 @@ def parse_opinion_text(text):
     result["atmosphere_hashtags"] = list(dict.fromkeys(result["atmosphere_hashtags"]))
     return result
 
-# ==================== ГЕНЕРАЦИЯ СЛАЙДОВ ====================
-
 def split_opinion_with_deepseek(text, rating, hashtags, atmosphere_hashtags):
-    """Разбивает мнение на 5 блоков через DeepSeek"""
-    
     prompt = f"""Ты — КиноИщейка, собака-девочка, кинокритик. Разбей мнение на 5 блоков для слайдов.
 
-Мнение:
-{text}
+Мнение: {text}
 
 Слайды:
 1. "О чём лай?" — о сюжете
@@ -113,11 +123,7 @@ def split_opinion_with_deepseek(text, rating, hashtags, atmosphere_hashtags):
 {{"blocks": ["блок1", "блок2", "блок3", "блок4", "блок5"]}}"""
 
     try:
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
+        headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
         data = {
             "model": "deepseek-chat",
             "messages": [{"role": "user", "content": prompt}],
@@ -147,44 +153,76 @@ def split_opinion_with_deepseek(text, rating, hashtags, atmosphere_hashtags):
 def fallback_split(text):
     sentences = re.split(r'[.!?]', text)
     sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-    
     while len(sentences) < 5:
         sentences.append(sentences[-1] if sentences else "Нет данных")
-    
     return [sentences[i] + "." for i in range(5)]
 
-def format_cards_output(film_data, opinion_data, blocks):
-    """Форматирует вывод карточек"""
-    slide_titles = ["О чём лай?", "Какая атмосфера?", "Какая игра?", "Что зарыто?", "Какой вердикт?"]
+def generate_card_html(frame_path, film_data, slide_title, slide_text, rating, hashtags, atmosphere_hashtags, is_first, is_atmosphere, is_last):
+    """Генерирует HTML для одной карточки из шаблона"""
+    html = get_template()
     
-    result = f"🐕 <b>Карточки для фильма: {film_data['title']}</b>\n\n"
+    with open(frame_path, 'rb') as f:
+        img_data = base64.b64encode(f.read()).decode('utf-8')
     
-    # Информация о фильме
-    result += "📋 <b>Информация о фильме:</b>\n"
-    result += f"🎬 Название: {film_data['title']}\n"
-    if film_data.get('year'):
-        result += f"📅 Год: {film_data['year']}\n"
-    if film_data.get('country'):
-        result += f"🌍 Страна: {film_data['country']}\n"
-    if film_data.get('director'):
-        result += f"🎭 Режиссёр: {film_data['director']}\n"
-    if film_data.get('actors'):
-        result += f"👥 Актеры: {film_data['actors']}\n"
+    country_year = film_data["country"]
+    if film_data.get("year"):
+        country_year += f", {film_data['year']}"
     
-    result += "\n📝 <b>Слайды:</b>\n"
+    html = html.replace("{{FRAME}}", f"data:image/jpeg;base64,{img_data}")
+    html = html.replace("{{SLIDE_TITLE}}", slide_title)
+    html = html.replace("{{SLIDE_TEXT}}", slide_text)
+    html = html.replace("{{RUBRIC}}", "Мнение КиноИщейки")
+    html = html.replace("{{ARROW_VISIBLE}}", "" if is_first else "hidden")
     
-    for i, block in enumerate(blocks):
-        result += f"\n<b>{i+1}. {slide_titles[i]}</b>\n{block}\n"
+    if is_first:
+        html = html.replace("{{TITLE}}", film_data["title"])
+        html = html.replace("{{COUNTRY}}", country_year)
+        html = html.replace("{{DIRECTOR}}", film_data["director"])
+        html = html.replace("{{ACTORS}}", film_data["actors"])
+        html = html.replace("{{FILM_INFO_VISIBLE}}", "")
+    else:
+        html = html.replace("{{TITLE}}", "")
+        html = html.replace("{{COUNTRY}}", "")
+        html = html.replace("{{DIRECTOR}}", "")
+        html = html.replace("{{ACTORS}}", "")
+        html = html.replace("{{FILM_INFO_VISIBLE}}", "hidden")
     
-    result += f"\n⭐ <b>Оценка:</b> {opinion_data['rating']}/10"
+    if is_last:
+        bones = ""
+        for i in range(10):
+            if i < rating:
+                bones += '<span class="bone-filled">🦴</span>'
+            else:
+                bones += '<span class="bone-empty">🦴</span>'
+        html = html.replace("{{RATING}}", f'<div class="rating-wrapper"><span class="rating-number">{rating}</span><span class="rating-bones">{bones}</span></div>')
+    else:
+        html = html.replace("{{RATING}}", "")
     
-    if opinion_data['hashtags']:
-        result += f"\n🏷️ <b>Настроение:</b> {' '.join(opinion_data['hashtags'])}"
+    if is_atmosphere and atmosphere_hashtags:
+        html = html.replace("{{HASHTAGS}}", f'<div class="hashtags">{" ".join(atmosphere_hashtags[:5])}</div>')
+    elif is_last and hashtags:
+        html = html.replace("{{HASHTAGS}}", f'<div class="hashtags">{" ".join(hashtags[:5])}</div>')
+    else:
+        html = html.replace("{{HASHTAGS}}", "")
     
-    if opinion_data['atmosphere_hashtags']:
-        result += f"\n🌄 <b>Атмосфера:</b> {' '.join(opinion_data['atmosphere_hashtags'])}"
-    
-    return result
+    return html
+
+def html_to_image(html_content, output_path):
+    """Конвертирует HTML в изображение через playwright"""
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={'width': 1080, 'height': 1080})
+            page.set_content(html_content)
+            page.wait_for_timeout(1000)
+            page.screenshot(path=output_path, full_page=True)
+            browser.close()
+        return True
+    except Exception as e:
+        print(f"Ошибка конвертации: {e}")
+        return False
 
 # ==================== КОМАНДЫ ====================
 
@@ -202,6 +240,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    context.user_data['frames'] = []
     
     await query.edit_message_text(
         "📝 <b>Шаг 1: Отправь текст о фильме</b>\n\n"
@@ -247,68 +287,41 @@ async def handle_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_OPINION
     
     context.user_data['opinion_data'] = opinion_data
-    film_data = context.user_data.get('film_data', {})
     
-    await update.message.reply_text("🔄 Генерирую слайды...")
-    
-    try:
-        # Разбиваем на 5 блоков
-        blocks = split_opinion_with_deepseek(
-            opinion_data["opinion"],
-            opinion_data["rating"],
-            opinion_data["hashtags"],
-            opinion_data["atmosphere_hashtags"]
-        )
-        
-        # Форматируем результат
-        result = format_cards_output(film_data, opinion_data, blocks)
-        
-        # Кнопки
-        keyboard = [
-            [InlineKeyboardButton("🔄 Сгенерировать заново", callback_data="regenerate")],
-            [InlineKeyboardButton("📝 Начать заново", callback_data="restart")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Отправляем
-        if len(result) > 4000:
-            for i in range(0, len(result), 4000):
-                await update.message.reply_text(result[i:i+4000], parse_mode='HTML')
-            await update.message.reply_text("📌 Что дальше?", reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(result, parse_mode='HTML', reply_markup=reply_markup)
-        
-        context.user_data.clear()
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
-    
-    return ConversationHandler.END
+    await update.message.reply_text(
+        f"✅ Мнение распознано!\n\n"
+        f"⭐ Оценка: {opinion_data['rating']}/10\n"
+        f"🏷️ Настроение: {' '.join(opinion_data['hashtags'])}\n"
+        f"🌄 Атмосфера: {' '.join(opinion_data['atmosphere_hashtags'])}\n\n"
+        "📸 <b>Шаг 3: Отправь 5 кадров из фильма</b>\n"
+        "Отправляй изображения по одному (нужно 5 штук)\n\n"
+        "Или /cancel",
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_FRAMES
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("❌ Отменено. /start")
-    return ConversationHandler.END
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопок"""
-    query = update.callback_query
-    await query.answer()
+async def handle_frame(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'frames' not in context.user_data:
+        context.user_data['frames'] = []
     
-    data = query.data
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
     
-    if data == "regenerate":
-        # Берем данные из контекста (если есть)
-        film_data = context.user_data.get('film_data')
-        opinion_data = context.user_data.get('opinion_data')
-        
-        if not film_data or not opinion_data:
-            await query.message.reply_text("❌ Нет данных. Начни с /start")
-            return
-        
-        await query.message.reply_text("🔄 Перегенерирую...")
+    frame_num = len(context.user_data['frames']) + 1
+    frame_path = os.path.join(FRAMES_DIR, f"frame_{frame_num}.jpg")
+    await file.download_to_drive(frame_path)
+    context.user_data['frames'].append(frame_path)
+    
+    await update.message.reply_text(f"📸 Кадр {frame_num}/5 получен!")
+    
+    if len(context.user_data['frames']) == 5:
+        await update.message.reply_text("🔄 Все кадры получены! Генерирую карточки...")
         
         try:
+            film_data = context.user_data['film_data']
+            opinion_data = context.user_data['opinion_data']
+            frame_paths = context.user_data['frames']
+            
             blocks = split_opinion_with_deepseek(
                 opinion_data["opinion"],
                 opinion_data["rating"],
@@ -316,28 +329,53 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 opinion_data["atmosphere_hashtags"]
             )
             
-            result = format_cards_output(film_data, opinion_data, blocks)
+            slide_titles = ["О чём лай?", "Какая атмосфера?", "Какая игра?", "Что зарыто?", "Какой вердикт?"]
             
-            keyboard = [
-                [InlineKeyboardButton("🔄 Сгенерировать заново", callback_data="regenerate")],
-                [InlineKeyboardButton("📝 Начать заново", callback_data="restart")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            for i in range(5):
+                html = generate_card_html(
+                    frame_path=frame_paths[i],
+                    film_data=film_data,
+                    slide_title=slide_titles[i],
+                    slide_text=blocks[i],
+                    rating=opinion_data["rating"],
+                    hashtags=opinion_data["hashtags"],
+                    atmosphere_hashtags=opinion_data["atmosphere_hashtags"],
+                    is_first=(i == 0),
+                    is_atmosphere=(i == 1),
+                    is_last=(i == 4)
+                )
+                
+                output_path = os.path.join(OUTPUT_DIR, f"card_{i+1}.png")
+                success = html_to_image(html, output_path)
+                
+                if success:
+                    with open(output_path, 'rb') as f:
+                        await update.message.reply_photo(f, caption=f"Слайд {i+1}: {slide_titles[i]}")
+                    os.remove(output_path)
+                else:
+                    await update.message.reply_text(f"❌ Ошибка при генерации слайда {i+1}")
             
-            if len(result) > 4000:
-                for i in range(0, len(result), 4000):
-                    await query.message.reply_text(result[i:i+4000], parse_mode='HTML')
-            else:
-                await query.message.reply_text(result, parse_mode='HTML', reply_markup=reply_markup)
+            for path in frame_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+            
+            await update.message.reply_text("🎉 Готово! Все 5 карточек созданы!\nНажми /start чтобы начать заново")
+            
+            context.user_data.clear()
             
         except Exception as e:
-            await query.message.reply_text(f"❌ Ошибка: {str(e)}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        
+        return ConversationHandler.END
     
-    elif data == "restart":
-        context.user_data.clear()
-        await query.message.reply_text("📝 Нажми /start чтобы начать заново")
+    return WAITING_FOR_FRAMES
 
-# ==================== СОЗДАЕМ ПРИЛОЖЕНИЕ ====================
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ Отменено. /start")
+    return ConversationHandler.END
+
+# ==================== ПРИЛОЖЕНИЕ ====================
 custom_client = httpx.AsyncClient(
     timeout=httpx.Timeout(30.0),
     follow_redirects=True
@@ -363,12 +401,13 @@ conv_handler = ConversationHandler(
     states={
         WAITING_FOR_FILM: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_film)],
         WAITING_FOR_OPINION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_opinion)],
+        WAITING_FOR_FRAMES: [MessageHandler(filters.PHOTO, handle_frame)],
     },
     fallbacks=[CommandHandler("cancel", cancel)]
 )
 app.add_handler(conv_handler)
-app.add_handler(CallbackQueryHandler(button_callback, pattern="^(regenerate|restart)$"))
 
 # ==================== ЗАПУСК ====================
 print("🚀 Бот запущен!")
+print(f"📁 Шаблон: {os.path.join(TEMPLATES_DIR, 'opinion.html')}")
 app.run_polling()
