@@ -5,18 +5,16 @@ import json
 import logging
 import requests
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
 
-# Читаем конфиг с отключенной интерполяцией
 import configparser
 config = configparser.ConfigParser(interpolation=None)
 config.read(CONFIG_PATH)
 
-# Токен бота из конфига
 CARD_BOT_TOKEN = config['CardBot']['token']
 OPENAI_API_KEY = config['OpenAI']['api_key']
 OPENAI_BASE_URL = config['OpenAI']['base_url']
@@ -30,10 +28,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ALLOWED_USER_ID = 397469639
-
-# Состояния для ConversationHandler
-WAITING_FOR_FILM = 1
-WAITING_FOR_OPINION = 2
 
 # ==================== ФУНКЦИИ ПАРСИНГА ====================
 
@@ -52,11 +46,8 @@ def parse_film_text(text):
     for i, line in enumerate(lines):
         line = line.strip()
         
-        # Первая строка - название
         if i == 0:
-            # Убираем эмодзи
             title_clean = re.sub(r'^[🎬📁⭐🌍🎭📝🎥👥]', '', line).strip()
-            # Ищем год в скобках
             year_match = re.search(r'\((\d{4})\)', title_clean)
             if year_match:
                 result["year"] = year_match.group(1)
@@ -65,7 +56,6 @@ def parse_film_text(text):
                 result["title"] = title_clean
             continue
         
-        # Остальные строки
         line_clean = re.sub(r'^[🎬📁⭐🌍🎭📝🎥👥]', '', line).strip()
         
         if "Страна:" in line_clean:
@@ -167,7 +157,6 @@ def split_opinion_with_ai(text, rating, hashtags, atmosphere_hashtags):
         
         logger.info("Ответ получен")
         
-        # Парсим JSON
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group())
@@ -237,68 +226,65 @@ def format_cards_output(film_data, opinion_data, blocks):
     
     return result
 
-# ==================== КОМАНДЫ ====================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало работы"""
+# ==================== КОМАНДА ГЕНЕРАЦИИ ====================
+
+async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /generate - генерирует карточки из текста"""
     user_id = update.message.from_user.id
     
     if user_id != ALLOWED_USER_ID:
         await update.message.reply_text("❌ Доступ запрещен")
         return
     
-    await update.message.reply_text(
-        "🐕 <b>КиноИщейка - генератор карточек</b>\n\n"
-        "Я помогу тебе разбить мнение о фильме на 5 слайдов для Instagram.\n\n"
-        "<b>Шаг 1:</b> Отправь текст о фильме в формате:\n\n"
-        "Название фильма (2024)\n"
-        "Страна: Россия\n"
-        "Режиссер: Иван Иванов\n"
-        "Актеры: Петр Петров, Анна Сидорова\n\n"
-        "Или /cancel для отмены",
-        parse_mode='HTML'
-    )
-    return WAITING_FOR_FILM
-
-
-async def handle_film(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текста фильма"""
-    user_id = update.message.from_user.id
+    # Проверяем, есть ли текст после команды
+    text = ' '.join(context.args)
     
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("❌ Доступ запрещен")
-        return ConversationHandler.END
-    
-    film_data = parse_film_text(update.message.text)
-    context.user_data['film_data'] = film_data
-    
-    await update.message.reply_text(
-        f"✅ Фильм: <b>{film_data['title']}</b>\n\n"
-        "<b>Шаг 2:</b> Отправь мнение о фильме в формате:\n\n"
-        "Твой отзыв...\n"
-        "Оценка: 8\n"
-        "Настроение: #классно #интересно\n"
-        "Атмосфера: #тёмная #атмосферная\n\n"
-        "Или /cancel для отмены",
-        parse_mode='HTML'
-    )
-    return WAITING_FOR_OPINION
-
-
-async def handle_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текста мнения"""
-    user_id = update.message.from_user.id
-    
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("❌ Доступ запрещен")
-        return ConversationHandler.END
-    
-    opinion_data = parse_opinion_text(update.message.text)
-    film_data = context.user_data.get('film_data', {})
+    if not text:
+        await update.message.reply_text(
+            "❌ Использование: /generate <текст фильма и мнение>\n\n"
+            "Пример:\n"
+            "/generate Название фильма (2024)\n"
+            "Страна: Россия\n"
+            "Режиссер: Иван Иванов\n"
+            "Актеры: Петр Петров\n\n"
+            "Отзыв о фильме...\n"
+            "Оценка: 8\n"
+            "Настроение: #классно #интересно\n"
+            "Атмосфера: #тёмная #атмосферная"
+        )
+        return
     
     await update.message.reply_text("🔄 Генерирую карточки...")
     
     try:
+        # Разделяем текст на части
+        parts = text.split('\n\n')
+        
+        if len(parts) < 2:
+            await update.message.reply_text(
+                "❌ Неправильный формат. Должны быть две части:\n"
+                "1. Информация о фильме\n"
+                "2. Мнение о фильме\n\n"
+                "Разделяй их пустой строкой."
+            )
+            return
+        
+        # Парсим фильм и мнение
+        film_text = parts[0]
+        opinion_text = parts[1]
+        
+        film_data = parse_film_text(film_text)
+        opinion_data = parse_opinion_text(opinion_text)
+        
+        if not film_data['title']:
+            await update.message.reply_text("❌ Не удалось распознать название фильма")
+            return
+        
+        if not opinion_data['opinion']:
+            await update.message.reply_text("❌ Не удалось распознать мнение о фильме")
+            return
+        
         # Разбиваем мнение на блоки
         blocks = split_opinion_with_ai(
             opinion_data["opinion"],
@@ -316,17 +302,53 @@ async def handle_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await update.message.reply_text(f"❌ Произошла ошибка: {str(e)}")
+
+
+async def generate_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка reply на команду /generate"""
+    user_id = update.message.from_user.id
     
-    # Очищаем контекст
-    context.user_data.clear()
-    return ConversationHandler.END
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Доступ запрещен")
+        return
+    
+    # Если это ответ на команду /generate
+    if update.message.reply_to_message and update.message.reply_to_message.text:
+        if '/generate' in update.message.reply_to_message.text:
+            text = update.message.text
+            await generate(update, context)
+            return
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена"""
-    await update.message.reply_text("❌ Операция отменена")
-    context.user_data.clear()
-    return ConversationHandler.END
+# ==================== КОМАНДЫ ====================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
+    user_id = update.message.from_user.id
+    
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Доступ запрещен")
+        return
+    
+    await update.message.reply_text(
+        "🐕 <b>КиноИщейка - генератор карточек</b>\n\n"
+        "📌 <b>Команды:</b>\n"
+        "/start - показать это сообщение\n"
+        "/generate - сгенерировать карточки\n"
+        "/help - помощь\n\n"
+        "📌 <b>Как использовать /generate:</b>\n"
+        "Отправь текст с информацией о фильме и мнением.\n\n"
+        "Пример:\n"
+        "<code>/generate Название фильма (2024)\n"
+        "Страна: Россия\n"
+        "Режиссер: Иван Иванов\n"
+        "Актеры: Петр Петров\n\n"
+        "Отзыв о фильме...\n"
+        "Оценка: 8\n"
+        "Настроение: #классно #интересно\n"
+        "Атмосфера: #тёмная #атмосферная</code>",
+        parse_mode='HTML'
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,13 +361,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🐕 <b>Помощь</b>\n\n"
-        "/start - начать создание карточек\n"
-        "/help - показать это сообщение\n"
-        "/cancel - отменить текущую операцию\n\n"
-        "Как это работает:\n"
-        "1. Отправь текст о фильме\n"
-        "2. Отправь мнение с оценкой и хэштегами\n"
-        "3. Бот разобьет мнение на 5 слайдов",
+        "📌 <b>Команды:</b>\n"
+        "/start - показать приветствие\n"
+        "/generate - сгенерировать карточки\n"
+        "/help - показать это сообщение\n\n"
+        "📌 <b>Формат для /generate:</b>\n\n"
+        "Первая часть - информация о фильме:\n"
+        "Название фильма (2024)\n"
+        "Страна: Россия\n"
+        "Режиссер: Иван Иванов\n"
+        "Актеры: Петр Петров, Анна Сидорова\n\n"
+        "Вторая часть - мнение (через пустую строку):\n"
+        "Текст отзыва...\n"
+        "Оценка: 8\n"
+        "Настроение: #классно #интересно\n"
+        "Атмосфера: #тёмная #атмосферная",
         parse_mode='HTML'
     )
 
@@ -363,23 +393,13 @@ def main():
     # Создаем приложение
     application = Application.builder().token(CARD_BOT_TOKEN).build()
     
-    # ConversationHandler для пошагового ввода
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            WAITING_FOR_FILM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_film)
-            ],
-            WAITING_FOR_OPINION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_opinion)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    
-    # Добавляем обработчики
-    application.add_handler(conv_handler)
+    # Добавляем команды
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("generate", generate))
+    
+    # Обработчик для текстовых сообщений (реплай на generate)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_reply))
     
     # Запускаем бота
     print("🚀 Бот запущен! Ожидаю команды...")
