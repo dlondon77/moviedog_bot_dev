@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Jura:wght@400;700&family=Open+Sans:wght@400;700&display=swap');
+  
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  
+  .card {
+    width: 1080px;
+    height: 1080px;
+    position: relative;
+    overflow: hidden;
+    font-family: 'Open Sans', sans-serif;
+    background: #000;
+  }
+  
+  .card .background {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 0;
+  }
+  
+  /* Градиент сверху */
+  .card .overlay-top {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 400px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.6) 40%, rgba(0,0,0,0) 100%);
+    z-index: 1;
+  }
+  
+  /* Градиент снизу */
+  .card .overlay-bottom {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 450px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.6) 30%, rgba(0,0,0,0.9) 100%);
+    z-index: 1;
+  }
+  
+  /* СТРЕЛКА В ВЕРХНЕМ ПРАВОМ УГЛУ - белая, слева направо */
+  .card .arrow-top-right {
+    position: absolute;
+    top: 30px;
+    right: 40px;
+    z-index: 3;
+    font-size: 36px;
+    color: #ffffff;
+    opacity: 0.8;
+    font-family: 'Jura', sans-serif;
+  }
+  
+  .card .arrow-top-right.hidden {
+    display: none;
+  }
+  
+  .card .top-info {
+    position: absolute;
+    top: 30px;
+    left: 50px;
+    right: 50px;
+    z-index: 2;
+    color: white;
+  }
+  
+  .card .top-info.hidden {
+    display: none;
+  }
+  
+  .card .title {
+    font-size: 55px;
+    font-weight: 700;
+    font-family: 'Jura', sans-serif;
+    color: #9d7ad0;
+    margin-bottom: 6px;
+    line-height: 1;
+  }
+  
+  .card .country {
+    font-size: 27px;
+    font-family: 'Jura', sans-serif;
+    font-weight: 400;
+    color: #ffffff;
+    margin-bottom: 4px;
+  }
+  
+  .card .director {
+    font-size: 20px;
+    font-family: 'Open Sans', sans-serif;
+    font-weight: 400;
+    color: #ffffff;
+    margin-bottom: 2px;
+  }
+  
+  .card .director span {
+    color: #40a7e3;
+  }
+  
+  .card .actors {
+    font-size: 20px;
+    font-family: 'Open Sans', sans-serif;
+    font-weight: 400;
+    color: #ffffff;
+    opacity: 0.9;
+  }
+  
+  .card .actors span {
+    color: #40a7e3;
+  }
+  
+  .card .bottom-info {
+    position: absolute;
+    bottom: 80px;
+    left: 50px;
+    right: 50px;
+    z-index: 2;
+    color: white;
+  }
+  
+  .card .slide-title {
+    font-size: 35px;
+    font-weight: 700;
+    font-family: 'Jura', sans-serif;
+    color: #9d7ad0;
+    margin-bottom: 6px;
+  }
+  
+  .card .slide-text {
+    font-size: 27px;
+    font-weight: 400;
+    font-family: 'Open Sans', sans-serif;
+    line-height: 1.4;
+    color: #ffffff;
+    text-align: justify;
+    max-width: 95%;
+    margin-bottom: 16px;
+  }
+  
+  .card .bottom-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 2;
+    position: relative;
+    width: 100%;
+  }
+  
+  .card .rubric-bottom {
+    font-size: 35px;
+    font-weight: 700;
+    font-family: 'Jura', sans-serif;
+    color: #d65e7d;
+  }
+  
+  /* КОСТОЧКИ - эмодзи */
+  .card .rating-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .card .rating-number {
+    font-size: 36px;
+    font-weight: 700;
+    font-family: 'Jura', sans-serif;
+    color: #d65e7d;
+  }
+  
+  .card .rating-bones {
+    display: flex;
+    gap: 2px;
+  }
+  
+  .card .bone-filled {
+    color: #d65e7d;
+    font-size: 24px;
+  }
+  
+  .card .bone-empty {
+    color: #d65e7d;
+    font-size: 24px;
+    opacity: 0.3;
+  }
+  
+  /* Все хэштеги голубого цвета */
+  .card .hashtags {
+    position: absolute;
+    bottom: 30px;
+    left: 50px;
+    right: 50px;
+    z-index: 2;
+    font-size: 24px;
+    font-family: 'Open Sans', sans-serif;
+    color: #40a7e3;
+    opacity: 0.9;
+    text-align: left;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <img class="background" src="{{FRAME}}" alt="Кадр">
+  
+  <div class="overlay-top"></div>
+  <div class="overlay-bottom"></div>
+  
+  <!-- СТРЕЛКА В ПРАВОМ ВЕРХНЕМ УГЛУ -->
+  <div class="arrow-top-right {{ARROW_VISIBLE}}">→</div>
+  
+  <div class="top-info {{FILM_INFO_VISIBLE}}">
+    <div class="title">{{TITLE}}</div>
+    <div class="country">{{COUNTRY}}</div>
+    <div class="director"><span>Режиссёр:</span> {{DIRECTOR}}</div>
+    <div class="actors"><span>В ролях:</span> {{ACTORS}}</div>
+  </div>
+  
+  <div class="bottom-info">
+    <div class="slide-title">{{SLIDE_TITLE}}</div>
+    <div class="slide-text">{{SLIDE_TEXT}}</div>
+    
+    <div class="bottom-row">
+      <div class="rubric-bottom">{{RUBRIC}}</div>
+      {{RATING}}
+    </div>
+  </div>
+  
+  {{HASHTAGS}}
+</div>
+
+</body>
+</html>
