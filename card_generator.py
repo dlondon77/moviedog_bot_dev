@@ -1,7 +1,11 @@
 # bot.py
+import configparser
 from telegram.ext import Application, CommandHandler
 
-TOKEN = "8820530223:AAEsG8fhJyuwl-VtxYGqWszbEDwYL1mpyPI"
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+TOKEN = config['CardBot']['token']
 
 async def start(update, context):
     await update.message.reply_text("🐕 Привет!")
