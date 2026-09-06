@@ -4,6 +4,7 @@ import re
 import json
 import logging
 import requests
+import configparser
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -11,13 +12,35 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
 
-import configparser
+# Читаем конфиг с отключенной интерполяцией
 config = configparser.ConfigParser(interpolation=None)
 config.read(CONFIG_PATH)
 
-CARD_BOT_TOKEN = config['CardBot']['token']
-OPENAI_API_KEY = config['OpenAI']['api_key']
-OPENAI_BASE_URL = config['OpenAI']['base_url']
+# Получаем токен из конфига (если значение с %, то это переменная окружения)
+def get_config_value(section, key):
+    """Получает значение из конфига, поддерживая %VAR% синтаксис"""
+    value = config[section][key]
+    if value.startswith('%') and value.endswith('%'):
+        # Это ссылка на переменную окружения
+        env_var = value.strip('%')
+        return os.environ.get(env_var, value)
+    return value
+
+# Читаем токены
+CARD_BOT_TOKEN = get_config_value('CardBot', 'token')
+OPENAI_API_KEY = get_config_value('OpenAI', 'api_key')
+OPENAI_BASE_URL = get_config_value('OpenAI', 'base_url')
+
+if not CARD_BOT_TOKEN or CARD_BOT_TOKEN.startswith('%'):
+    print("❌ Ошибка: CARD_BOT_TOKEN не найден в конфиге или переменных окружения!")
+    print("   Проверьте config/config.ini и переменные окружения")
+    exit(1)
+
+if not OPENAI_API_KEY or OPENAI_API_KEY.startswith('%'):
+    print("❌ Ошибка: OPENAI_API_KEY не найден в конфиге или переменных окружения!")
+    print("   Проверьте config/config.ini и переменные окружения")
+    exit(1)
+
 DEEPSEEK_URL = f"{OPENAI_BASE_URL}/v1/chat/completions"
 
 # ==================== НАСТРОЙКА ====================
@@ -29,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_USER_ID = 397469639
 
-# ==================== ФУНКЦИИ ПАРСИНГА ====================
+# ==================== ФУНКЦИИ ====================
 
 def parse_film_text(text):
     """Парсит текст фильма"""
@@ -227,7 +250,7 @@ def format_cards_output(film_data, opinion_data, blocks):
     return result
 
 
-# ==================== КОМАНДА ГЕНЕРАЦИИ ====================
+# ==================== КОМАНДЫ ====================
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /generate - генерирует карточки из текста"""
@@ -237,7 +260,6 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Доступ запрещен")
         return
     
-    # Проверяем, есть ли текст после команды
     text = ' '.join(context.args)
     
     if not text:
@@ -258,7 +280,6 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Генерирую карточки...")
     
     try:
-        # Разделяем текст на части
         parts = text.split('\n\n')
         
         if len(parts) < 2:
@@ -270,7 +291,6 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Парсим фильм и мнение
         film_text = parts[0]
         opinion_text = parts[1]
         
@@ -285,7 +305,6 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Не удалось распознать мнение о фильме")
             return
         
-        # Разбиваем мнение на блоки
         blocks = split_opinion_with_ai(
             opinion_data["opinion"],
             opinion_data["rating"],
@@ -293,34 +312,19 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             opinion_data["atmosphere_hashtags"]
         )
         
-        # Форматируем результат
         result = format_cards_output(film_data, opinion_data, blocks)
         
-        # Отправляем результат
-        await update.message.reply_text(result, parse_mode='HTML')
+        # Отправляем результат (может быть длинным, разбиваем если нужно)
+        if len(result) > 4000:
+            for i in range(0, len(result), 4000):
+                await update.message.reply_text(result[i:i+4000], parse_mode='HTML')
+        else:
+            await update.message.reply_text(result, parse_mode='HTML')
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await update.message.reply_text(f"❌ Произошла ошибка: {str(e)}")
 
-
-async def generate_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка reply на команду /generate"""
-    user_id = update.message.from_user.id
-    
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("❌ Доступ запрещен")
-        return
-    
-    # Если это ответ на команду /generate
-    if update.message.reply_to_message and update.message.reply_to_message.text:
-        if '/generate' in update.message.reply_to_message.text:
-            text = update.message.text
-            await generate(update, context)
-            return
-
-
-# ==================== КОМАНДЫ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
@@ -391,15 +395,17 @@ def main():
     print("=" * 40)
     
     # Создаем приложение
-    application = Application.builder().token(CARD_BOT_TOKEN).build()
+    try:
+        application = Application.builder().token(CARD_BOT_TOKEN).build()
+    except Exception as e:
+        print(f"❌ Ошибка создания приложения: {e}")
+        print("   Проверьте правильность токена")
+        return
     
     # Добавляем команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("generate", generate))
-    
-    # Обработчик для текстовых сообщений (реплай на generate)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_reply))
     
     # Запускаем бота
     print("🚀 Бот запущен! Ожидаю команды...")
