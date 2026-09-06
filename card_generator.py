@@ -16,31 +16,6 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-import httpx
-from telegram.request import HTTPXRequest
-
-# ==================== ПОЛНОЕ ОТКЛЮЧЕНИЕ ПРОКСИ ====================
-# Удаляем все возможные переменные прокси
-for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
-    os.environ.pop(env_var, None)
-
-# Создаем кастомный HTTP клиент без прокси
-custom_async_client = httpx.AsyncClient(
-    timeout=httpx.Timeout(30.0),
-    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
-    follow_redirects=True
-)
-
-# Создаем кастомный HTTPXRequest с нашим клиентом
-custom_request = HTTPXRequest(
-    connection_pool_size=1,
-    connect_timeout=30.0,
-    read_timeout=30.0,
-    write_timeout=30.0,
-    pool_timeout=30.0
-)
-# Подменяем внутренний клиент
-custom_request._client = custom_async_client
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -796,11 +771,8 @@ def main():
     logger.info(f"Токен: {CARD_BOT_TOKEN[:10]}...")
     logger.info(f"OpenAI API Key: {OPENAI_API_KEY[:10]}...")
     
-    # Создаем приложение с кастомным клиентом
-    application = Application.builder() \
-        .token(CARD_BOT_TOKEN) \
-        .request(custom_request) \
-        .build()
+    # Создаем приложение (простой вариант без кастомного клиента)
+    application = Application.builder().token(CARD_BOT_TOKEN).build()
     
     # Создаем ConversationHandler
     conv_handler = ConversationHandler(
