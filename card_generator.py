@@ -21,8 +21,8 @@ from telegram.ext import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
 
-# Загрузка конфигурации
-config = configparser.ConfigParser()
+# Загрузка конфигурации с ОТКЛЮЧЕННОЙ интерполяцией
+config = configparser.ConfigParser(interpolation=None)
 config.read(CONFIG_PATH)
 
 # Пути из конфига
@@ -31,16 +31,37 @@ FRAMES_DIR = os.path.join(BASE_DIR, config['Data'].get('frames_dir', './frames')
 TEMPLATES_DIR = os.path.join(BASE_DIR, config['Data'].get('templates_dir', './templates'))
 LOG_PATH = os.path.join(BASE_DIR, config['Logs'].get('log_path_cards', './logs/cards_bot.log'))
 
-# DeepSeek API ключ из конфига
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY') or config['OpenAI']['api_key']
+# DeepSeek API ключ из переменной окружения или конфига
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+if not OPENAI_API_KEY:
+    # Если в конфиге значение с %, берем из переменной окружения
+    api_key_value = config['OpenAI']['api_key']
+    if api_key_value.startswith('%') and api_key_value.endswith('%'):
+        # Это имя переменной окружения
+        env_var_name = api_key_value.strip('%')
+        OPENAI_API_KEY = os.environ.get(env_var_name)
+    else:
+        OPENAI_API_KEY = api_key_value
+
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY не найден! Установите переменную окружения OPENAI_API_KEY")
+
 OPENAI_BASE_URL = config['OpenAI']['base_url']
 DEEPSEEK_URL = f"{OPENAI_BASE_URL}/v1/chat/completions"
 
-# Токен бота для генерации карточек из переменной окружения
+# Токен бота для генерации карточек
 CARD_BOT_TOKEN = os.environ.get('CARD_BOT_TOKEN')
+if not CARD_BOT_TOKEN:
+    # Если в конфиге значение с %, берем из переменной окружения
+    token_value = config['CardBot']['token']
+    if token_value.startswith('%') and token_value.endswith('%'):
+        env_var_name = token_value.strip('%')
+        CARD_BOT_TOKEN = os.environ.get(env_var_name)
+    else:
+        CARD_BOT_TOKEN = token_value
 
 if not CARD_BOT_TOKEN:
-    raise ValueError("CARD_BOT_TOKEN не найден в переменных окружения! Установите переменную CARD_BOT_TOKEN")
+    raise ValueError("CARD_BOT_TOKEN не найден! Установите переменную окружения CARD_BOT_TOKEN")
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
@@ -748,6 +769,7 @@ def main():
     logger.info(f"Запуск бота-генератора карточек")
     logger.info(f"Используется конфиг: {CONFIG_PATH}")
     logger.info(f"Токен: {CARD_BOT_TOKEN[:10]}...")
+    logger.info(f"OpenAI API Key: {OPENAI_API_KEY[:10]}...")
     
     # Создаем приложение
     application = Application.builder().token(CARD_BOT_TOKEN).build()
