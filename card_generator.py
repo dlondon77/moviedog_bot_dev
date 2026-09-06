@@ -16,52 +16,77 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
+import httpx
+from telegram.request import HTTPXRequest
+
+# ==================== ПОЛНОЕ ОТКЛЮЧЕНИЕ ПРОКСИ ====================
+# Удаляем все возможные переменные прокси
+for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
+    os.environ.pop(env_var, None)
+
+# Создаем кастомный HTTP клиент без прокси
+custom_async_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(30.0),
+    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+    follow_redirects=True
+)
+
+# Создаем кастомный HTTPXRequest с нашим клиентом
+custom_request = HTTPXRequest(
+    connection_pool_size=1,
+    connect_timeout=30.0,
+    read_timeout=30.0,
+    write_timeout=30.0,
+    pool_timeout=30.0
+)
+# Подменяем внутренний клиент
+custom_request._client = custom_async_client
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
 
-# ВАЖНО: загружаем конфиг с отключенной интерполяцией
+# Загрузка конфигурации с ОТКЛЮЧЕННОЙ интерполяцией
 config = configparser.ConfigParser(interpolation=None)
 config.read(CONFIG_PATH)
 
-# Функция для безопасного получения значения из конфига
-def get_config_value(section, key, default=None):
-    """Безопасно получает значение из конфига, обрабатывая % переменные"""
-    try:
-        value = config[section].get(key, default)
-        if value and isinstance(value, str) and value.startswith('%') and value.endswith('%'):
-            # Это имя переменной окружения
-            env_var = value.strip('%')
-            return os.environ.get(env_var, default)
-        return value
-    except:
-        return default
-
 # Пути из конфига
-OUTPUT_DIR = os.path.join(BASE_DIR, get_config_value('Data', 'output_dir', './output'))
-FRAMES_DIR = os.path.join(BASE_DIR, get_config_value('Data', 'frames_dir', './frames'))
-TEMPLATES_DIR = os.path.join(BASE_DIR, get_config_value('Data', 'templates_dir', './templates'))
-LOG_PATH = os.path.join(BASE_DIR, get_config_value('Logs', 'log_path_cards', './logs/cards_bot.log'))
+OUTPUT_DIR = os.path.join(BASE_DIR, config['Data'].get('output_dir', './output'))
+FRAMES_DIR = os.path.join(BASE_DIR, config['Data'].get('frames_dir', './frames'))
+TEMPLATES_DIR = os.path.join(BASE_DIR, config['Data'].get('templates_dir', './templates'))
+LOG_PATH = os.path.join(BASE_DIR, config['Logs'].get('log_path_cards', './logs/cards_bot.log'))
 
-# DeepSeek API ключ
+# DeepSeek API ключ из переменной окружения или конфига
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
-    OPENAI_API_KEY = get_config_value('OpenAI', 'api_key')
+    # Если в конфиге значение с %, берем из переменной окружения
+    api_key_value = config['OpenAI']['api_key']
+    if api_key_value.startswith('%') and api_key_value.endswith('%'):
+        # Это имя переменной окружения
+        env_var_name = api_key_value.strip('%')
+        OPENAI_API_KEY = os.environ.get(env_var_name)
+    else:
+        OPENAI_API_KEY = api_key_value
 
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY не найден! Установите переменную окружения OPENAI_API_KEY или укажите в config.ini")
+    raise ValueError("OPENAI_API_KEY не найден! Установите переменную окружения OPENAI_API_KEY")
 
-OPENAI_BASE_URL = get_config_value('OpenAI', 'base_url', 'https://api.deepseek.com')
+OPENAI_BASE_URL = config['OpenAI']['base_url']
 DEEPSEEK_URL = f"{OPENAI_BASE_URL}/v1/chat/completions"
 
 # Токен бота для генерации карточек
 CARD_BOT_TOKEN = os.environ.get('CARD_BOT_TOKEN')
 if not CARD_BOT_TOKEN:
-    CARD_BOT_TOKEN = get_config_value('CardBot', 'token')
+    # Если в конфиге значение с %, берем из переменной окружения
+    token_value = config['CardBot']['token']
+    if token_value.startswith('%') and token_value.endswith('%'):
+        env_var_name = token_value.strip('%')
+        CARD_BOT_TOKEN = os.environ.get(env_var_name)
+    else:
+        CARD_BOT_TOKEN = token_value
 
 if not CARD_BOT_TOKEN:
-    raise ValueError("CARD_BOT_TOKEN не найден! Установите переменную окружения CARD_BOT_TOKEN или укажите в config.ini")
+    raise ValueError("CARD_BOT_TOKEN не найден! Установите переменную окружения CARD_BOT_TOKEN")
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
@@ -75,10 +100,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-logger.info(f"Загрузка конфига из: {CONFIG_PATH}")
-logger.info(f"Токен бота: {CARD_BOT_TOKEN[:10]}...")
-logger.info(f"OpenAI API Key: {OPENAI_API_KEY[:10]}...")
 
 # ==================== СОЗДАНИЕ ДИРЕКТОРИЙ ====================
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -774,12 +795,12 @@ def main():
     logger.info(f"Используется конфиг: {CONFIG_PATH}")
     logger.info(f"Токен: {CARD_BOT_TOKEN[:10]}...")
     logger.info(f"OpenAI API Key: {OPENAI_API_KEY[:10]}...")
-    logger.info(f"Директория вывода: {OUTPUT_DIR}")
-    logger.info(f"Директория кадров: {FRAMES_DIR}")
-    logger.info(f"Директория шаблонов: {TEMPLATES_DIR}")
     
-    # Создаем приложение
-    application = Application.builder().token(CARD_BOT_TOKEN).build()
+    # Создаем приложение с кастомным клиентом
+    application = Application.builder() \
+        .token(CARD_BOT_TOKEN) \
+        .request(custom_request) \
+        .build()
     
     # Создаем ConversationHandler
     conv_handler = ConversationHandler(
