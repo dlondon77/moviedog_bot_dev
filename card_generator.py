@@ -1,104 +1,390 @@
 # bot_card.py
 import os
-import configparser
+import re
+import json
 import logging
+import requests
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 
-# ==================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ====================
-print("🐕 ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ")
-print("=" * 40)
+# ==================== КОНФИГУРАЦИЯ ====================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
 
-card_token = os.environ.get('CARD_BOT_TOKEN')
-api_key = os.environ.get('OPENAI_API_KEY')
+# Читаем конфиг с отключенной интерполяцией
+import configparser
+config = configparser.ConfigParser(interpolation=None)
+config.read(CONFIG_PATH)
 
-if card_token:
-    print(f"✅ CARD_BOT_TOKEN = {card_token[:10]}...")
-else:
-    print("❌ CARD_BOT_TOKEN не найден")
-    exit(1)
+# Токен бота из конфига
+CARD_BOT_TOKEN = config['CardBot']['token']
+OPENAI_API_KEY = config['OpenAI']['api_key']
+OPENAI_BASE_URL = config['OpenAI']['base_url']
+DEEPSEEK_URL = f"{OPENAI_BASE_URL}/v1/chat/completions"
 
-if api_key:
-    print(f"✅ OPENAI_API_KEY = {api_key[:10]}...")
-else:
-    print("❌ OPENAI_API_KEY не найден")
-    exit(1)
-
-print("=" * 40)
-print("✅ Все переменные найдены! Запускаю бота...")
-print("=" * 40)
-
-# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
+# ==================== НАСТРОЙКА ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ==================== КОНФИГУРАЦИЯ ====================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
-
-# Загрузка конфига
-config = configparser.ConfigParser(interpolation=None)
-config.read(CONFIG_PATH)
-
-# Только для этого user_id
 ALLOWED_USER_ID = 397469639
+
+# Состояния для ConversationHandler
+WAITING_FOR_FILM = 1
+WAITING_FOR_OPINION = 2
+
+# ==================== ФУНКЦИИ ПАРСИНГА ====================
+
+def parse_film_text(text):
+    """Парсит текст фильма"""
+    result = {
+        "title": "",
+        "year": "",
+        "country": "",
+        "director": "",
+        "actors": ""
+    }
+    
+    lines = text.strip().split('\n')
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        # Первая строка - название
+        if i == 0:
+            # Убираем эмодзи
+            title_clean = re.sub(r'^[🎬📁⭐🌍🎭📝🎥👥]', '', line).strip()
+            # Ищем год в скобках
+            year_match = re.search(r'\((\d{4})\)', title_clean)
+            if year_match:
+                result["year"] = year_match.group(1)
+                result["title"] = re.sub(r'\s*\(\d{4}\)$', '', title_clean).strip()
+            else:
+                result["title"] = title_clean
+            continue
+        
+        # Остальные строки
+        line_clean = re.sub(r'^[🎬📁⭐🌍🎭📝🎥👥]', '', line).strip()
+        
+        if "Страна:" in line_clean:
+            result["country"] = line_clean.replace("Страна:", "").strip()
+        elif "Режиссер" in line_clean or "Режиссёр" in line_clean:
+            result["director"] = line_clean.replace("Режиссер:", "").replace("Режиссёр:", "").strip()
+        elif "Актеры" in line_clean or "Актёры" in line_clean:
+            result["actors"] = line_clean.replace("Актеры:", "").replace("Актёры:", "").strip()
+    
+    return result
+
+
+def parse_opinion_text(text):
+    """Парсит текст мнения"""
+    result = {
+        "opinion": "",
+        "rating": 0,
+        "hashtags": [],
+        "atmosphere_hashtags": []
+    }
+    
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("Оценка:"):
+            match = re.search(r'(\d+)', line)
+            if match:
+                result["rating"] = int(match.group(1))
+        elif line.startswith("Настроение:"):
+            result["hashtags"].extend(re.findall(r'#[А-Яа-яA-Za-z_\w]+', line))
+        elif line.startswith("Атмосфера:"):
+            result["atmosphere_hashtags"].extend(re.findall(r'#[А-Яа-яA-Za-z_\w]+', line))
+        else:
+            result["opinion"] += line + " "
+    
+    result["opinion"] = result["opinion"].strip()
+    result["hashtags"] = list(dict.fromkeys(result["hashtags"]))
+    result["atmosphere_hashtags"] = list(dict.fromkeys(result["atmosphere_hashtags"]))
+    return result
+
+
+def split_opinion_with_ai(text, rating, hashtags, atmosphere_hashtags):
+    """Разбивает мнение на 5 блоков через AI"""
+    
+    prompt = f"""Ты — КиноИщейка, собака-девочка, кинокритик. Разбей своё мнение о фильме на 5 смысловых блоков для слайдов.
+
+Твоё мнение:
+{text}
+
+Разбей на 5 блоков для слайдов:
+1️⃣ "О чём лай?" — кратко о сюжете
+2️⃣ "Какая атмосфера?" — об атмосфере и визуале
+3️⃣ "Какая игра?" — об актёрской игре
+4️⃣ "Что зарыто?" — о скрытых смыслах
+5️⃣ "Какой вердикт?" — итоговое мнение
+
+ПРАВИЛА:
+- Каждый блок — 1-2 предложения (максимум 30 слов)
+- Сохрани образ КиноИщейки (говори о себе в женском роде)
+- НЕ добавляй новые факты
+- В 5-м блоке НЕ упоминай оценку числом
+
+Оценка: {rating}/10 (НЕ упоминай в тексте!)
+Хэштеги настроения: {" ".join(hashtags)}
+Хэштеги атмосферы: {" ".join(atmosphere_hashtags)}
+
+Верни ответ строго в формате JSON:
+{{
+    "blocks": [
+        "текст для слайда 1",
+        "текст для слайда 2",
+        "текст для слайда 3",
+        "текст для слайда 4",
+        "текст для слайда 5"
+    ]
+}}"""
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": "Ты — КиноИщейка, собака-девочка, кинокритик. Отвечай только JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 600
+        }
+        
+        logger.info("Отправляем запрос в DeepSeek...")
+        response = requests.post(DEEPSEEK_URL, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        
+        logger.info("Ответ получен")
+        
+        # Парсим JSON
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+            blocks = data.get("blocks", [])
+            if len(blocks) >= 5:
+                return blocks[:5]
+        
+        logger.warning("Не удалось распарсить ответ, используем fallback")
+        return fallback_split(text)
+        
+    except Exception as e:
+        logger.error(f"Ошибка AI: {e}")
+        return fallback_split(text)
+
+
+def fallback_split(text):
+    """Запасной вариант разбивки"""
+    sentences = re.split(r'[.!?]', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    
+    if len(sentences) >= 5:
+        return [sentences[i] + "." for i in range(5)]
+    
+    while len(sentences) < 5:
+        sentences.append(sentences[-1] if sentences else "Нет данных")
+    
+    return [sentences[i] + "." for i in range(5)]
+
+
+def format_cards_output(film_data, opinion_data, blocks):
+    """Форматирует вывод карточек"""
+    slide_titles = [
+        "О чём лай?",
+        "Какая атмосфера?",
+        "Какая игра?",
+        "Что зарыто?",
+        "Какой вердикт?"
+    ]
+    
+    result = f"🐕 <b>Карточки для фильма: {film_data['title']}</b>\n\n"
+    
+    # Информация о фильме
+    result += "📋 <b>Информация о фильме:</b>\n"
+    result += f"🎬 Название: {film_data['title']}\n"
+    if film_data['year']:
+        result += f"📅 Год: {film_data['year']}\n"
+    if film_data['country']:
+        result += f"🌍 Страна: {film_data['country']}\n"
+    if film_data['director']:
+        result += f"🎭 Режиссёр: {film_data['director']}\n"
+    if film_data['actors']:
+        result += f"👥 Актеры: {film_data['actors']}\n"
+    
+    result += "\n📝 <b>Слайды:</b>\n"
+    
+    for i, block in enumerate(blocks):
+        result += f"\n<b>{i+1}. {slide_titles[i]}</b>\n"
+        result += f"{block}\n"
+    
+    result += f"\n⭐ <b>Оценка:</b> {opinion_data['rating']}/10"
+    
+    if opinion_data['hashtags']:
+        result += f"\n🏷️ <b>Настроение:</b> {' '.join(opinion_data['hashtags'])}"
+    
+    if opinion_data['atmosphere_hashtags']:
+        result += f"\n🌄 <b>Атмосфера:</b> {' '.join(opinion_data['atmosphere_hashtags'])}"
+    
+    return result
 
 # ==================== КОМАНДЫ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверяем user_id и выводим переменные"""
-    user_id = update.message.from_user.id
-    
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text(
-            "❌ Извините, этот бот только для тестирования.\n"
-            "Доступ запрещен."
-        )
-        return
-    
-    # Получаем переменные окружения
-    card_token = os.environ.get('CARD_BOT_TOKEN', 'НЕ НАЙДЕН')
-    api_key = os.environ.get('OPENAI_API_KEY', 'НЕ НАЙДЕН')
-    
-    # Формируем сообщение
-    message = (
-        "🐕 <b>Переменные окружения:</b>\n\n"
-        f"📌 CARD_BOT_TOKEN: <code>{card_token}</code>\n"
-        f"📌 OPENAI_API_KEY: <code>{api_key}</code>\n\n"
-        "✅ Бот работает!"
-    )
-    
-    await update.message.reply_text(message, parse_mode='HTML')
-
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Просто эхо для проверки"""
+    """Начало работы"""
     user_id = update.message.from_user.id
     
     if user_id != ALLOWED_USER_ID:
         await update.message.reply_text("❌ Доступ запрещен")
         return
     
-    await update.message.reply_text(f"🐕 Вы написали: {update.message.text}")
+    await update.message.reply_text(
+        "🐕 <b>КиноИщейка - генератор карточек</b>\n\n"
+        "Я помогу тебе разбить мнение о фильме на 5 слайдов для Instagram.\n\n"
+        "<b>Шаг 1:</b> Отправь текст о фильме в формате:\n\n"
+        "Название фильма (2024)\n"
+        "Страна: Россия\n"
+        "Режиссер: Иван Иванов\n"
+        "Актеры: Петр Петров, Анна Сидорова\n\n"
+        "Или /cancel для отмены",
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_FILM
+
+
+async def handle_film(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текста фильма"""
+    user_id = update.message.from_user.id
+    
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Доступ запрещен")
+        return ConversationHandler.END
+    
+    film_data = parse_film_text(update.message.text)
+    context.user_data['film_data'] = film_data
+    
+    await update.message.reply_text(
+        f"✅ Фильм: <b>{film_data['title']}</b>\n\n"
+        "<b>Шаг 2:</b> Отправь мнение о фильме в формате:\n\n"
+        "Твой отзыв...\n"
+        "Оценка: 8\n"
+        "Настроение: #классно #интересно\n"
+        "Атмосфера: #тёмная #атмосферная\n\n"
+        "Или /cancel для отмены",
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_OPINION
+
+
+async def handle_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текста мнения"""
+    user_id = update.message.from_user.id
+    
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Доступ запрещен")
+        return ConversationHandler.END
+    
+    opinion_data = parse_opinion_text(update.message.text)
+    film_data = context.user_data.get('film_data', {})
+    
+    await update.message.reply_text("🔄 Генерирую карточки...")
+    
+    try:
+        # Разбиваем мнение на блоки
+        blocks = split_opinion_with_ai(
+            opinion_data["opinion"],
+            opinion_data["rating"],
+            opinion_data["hashtags"],
+            opinion_data["atmosphere_hashtags"]
+        )
+        
+        # Форматируем результат
+        result = format_cards_output(film_data, opinion_data, blocks)
+        
+        # Отправляем результат
+        await update.message.reply_text(result, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+        await update.message.reply_text(f"❌ Произошла ошибка: {str(e)}")
+    
+    # Очищаем контекст
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена"""
+    await update.message.reply_text("❌ Операция отменена")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /help"""
+    user_id = update.message.from_user.id
+    
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Доступ запрещен")
+        return
+    
+    await update.message.reply_text(
+        "🐕 <b>Помощь</b>\n\n"
+        "/start - начать создание карточек\n"
+        "/help - показать это сообщение\n"
+        "/cancel - отменить текущую операцию\n\n"
+        "Как это работает:\n"
+        "1. Отправь текст о фильме\n"
+        "2. Отправь мнение с оценкой и хэштегами\n"
+        "3. Бот разобьет мнение на 5 слайдов",
+        parse_mode='HTML'
+    )
 
 
 # ==================== MAIN ====================
 
 def main():
-    # Создаем приложение
-    application = Application.builder().token(card_token).build()
+    """Запуск бота"""
+    print("🐕 КиноИщейка - генератор карточек")
+    print("=" * 40)
+    print(f"Токен: {CARD_BOT_TOKEN[:10]}...")
+    print(f"API URL: {OPENAI_BASE_URL}")
+    print("=" * 40)
     
-    # Добавляем команды
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    # Создаем приложение
+    application = Application.builder().token(CARD_BOT_TOKEN).build()
+    
+    # ConversationHandler для пошагового ввода
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_FOR_FILM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_film)
+            ],
+            WAITING_FOR_OPINION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_opinion)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    
+    # Добавляем обработчики
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("help", help_command))
     
     # Запускаем бота
-    print("🐕 Бот запущен!")
-    print(f"Доступен только для user_id: {ALLOWED_USER_ID}")
+    print("🚀 Бот запущен! Ожидаю команды...")
     print("Для остановки нажмите Ctrl+C")
+    print("=" * 40)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
