@@ -4,22 +4,17 @@ import re
 import json
 import configparser
 import requests
-import httpx
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.request import HTTPXRequest
-
-# ==================== ОТКЛЮЧАЕМ ПРОКСИ ====================
-for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
-    os.environ.pop(env_var, None)
+import logging
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config.ini')
 
+# Читаем конфиг
 config = configparser.ConfigParser(interpolation=None)
 config.read(CONFIG_PATH)
 
+# Получаем токены
 TOKEN = config['CardBot']['token']
 OPENAI_API_KEY = config['OpenAI']['api_key']
 OPENAI_BASE_URL = config['OpenAI']['base_url']
@@ -27,30 +22,9 @@ DEEPSEEK_URL = f"{OPENAI_BASE_URL}/v1/chat/completions"
 
 ALLOWED_USER_ID = 397469639
 
-print("🐕 Запуск бота...")
-print(f"Токен: {TOKEN[:10]}...")
-
-# ==================== СОЗДАЕМ КАСТОМНЫЙ КЛИЕНТ ====================
-# Создаем HTTP клиент без прокси
-custom_client = httpx.AsyncClient(
-    timeout=httpx.Timeout(30.0),
-    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
-    follow_redirects=True
-)
-
-# Создаем кастомный HTTPXRequest
-custom_request = HTTPXRequest(
-    connection_pool_size=1,
-    connect_timeout=30.0,
-    read_timeout=30.0,
-    write_timeout=30.0,
-    pool_timeout=30.0
-)
-# Подменяем внутренний клиент
-custom_request._client = custom_client
-
-# ==================== СОЗДАЕМ ПРИЛОЖЕНИЕ ====================
-app = Application.builder().token(TOKEN).request(custom_request).build()
+# ==================== ЛОГИРОВАНИЕ ====================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ==================== ФУНКЦИИ ====================
 
@@ -132,119 +106,151 @@ def split_opinion_with_ai(text):
         return [f"Блок {i+1}" for i in range(5)]
         
     except Exception as e:
-        print(f"Ошибка AI: {e}")
+        logger.error(f"Ошибка AI: {e}")
         return [f"Блок {i+1}" for i in range(5)]
 
-# ==================== КОМАНДЫ ====================
+# ==================== ОБРАБОТКА WEBHOOK (для btohost) ====================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("❌ Доступ запрещен")
-        return
-    
-    await update.message.reply_text(
-        "🐕 <b>КиноИщейка - генератор карточек</b>\n\n"
-        "Используй /generate с текстом:\n"
-        "<code>/generate Название (2024)\n"
-        "Страна: Россия\n"
-        "Режиссер: Иван Иванов\n"
-        "Актеры: Петр Петров\n\n"
-        "Отзыв о фильме...\n"
-        "Оценка: 8\n"
-        "Настроение: #классно\n"
-        "Атмосфера: #тёмная</code>",
-        parse_mode='HTML'
-    )
+from flask import Flask, request, jsonify
 
-async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("❌ Доступ запрещен")
-        return
-    
-    text = ' '.join(context.args)
-    if not text:
-        await update.message.reply_text(
-            "❌ Использование: /generate текст\n\n"
-            "Пример:\n"
-            "<code>/generate Название (2024)\n"
-            "Страна: Россия\n"
-            "Режиссер: Иван Иванов\n"
-            "Актеры: Петр Петров\n\n"
-            "Отзыв о фильме...\n"
-            "Оценка: 8\n"
-            "Настроение: #классно\n"
-            "Атмосфера: #тёмная</code>",
-            parse_mode='HTML'
-        )
-        return
-    
-    await update.message.reply_text("🔄 Генерирую карточки...")
-    
+app = Flask(__name__)
+
+# Хранилище состояний (для простоты, в продакшене используйте БД)
+user_data = {}
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Обработка входящих сообщений от Telegram"""
     try:
-        parts = text.split('\n\n')
-        if len(parts) < 2:
-            await update.message.reply_text("❌ Раздели фильм и мнение пустой строкой")
-            return
+        data = request.get_json()
         
-        film_data = parse_film_text(parts[0])
-        opinion_data = parse_opinion_text(parts[1])
+        if 'message' in data:
+            message = data['message']
+            chat_id = message['chat']['id']
+            user_id = message['from']['id']
+            text = message.get('text', '')
+            
+            # Проверка доступа
+            if user_id != ALLOWED_USER_ID:
+                send_message(chat_id, "❌ Доступ запрещен")
+                return jsonify({"status": "ok"})
+            
+            # Обработка команд
+            if text.startswith('/start'):
+                send_message(chat_id, 
+                    "🐕 <b>КиноИщейка - генератор карточек</b>\n\n"
+                    "Используй /generate с текстом:\n"
+                    "<code>/generate Название (2024)\n"
+                    "Страна: Россия\n"
+                    "Режиссер: Иван Иванов\n"
+                    "Актеры: Петр Петров\n\n"
+                    "Отзыв о фильме...\n"
+                    "Оценка: 8\n"
+                    "Настроение: #классно\n"
+                    "Атмосфера: #тёмная</code>",
+                    parse_mode='HTML'
+                )
+            
+            elif text.startswith('/generate'):
+                # Извлекаем текст после команды
+                parts = text.split(' ', 1)
+                if len(parts) < 2:
+                    send_message(chat_id, "❌ Напиши текст после /generate")
+                    return jsonify({"status": "ok"})
+                
+                content = parts[1]
+                send_message(chat_id, "🔄 Генерирую карточки...")
+                
+                try:
+                    # Разделяем на фильм и мнение
+                    sections = content.split('\n\n')
+                    if len(sections) < 2:
+                        send_message(chat_id, "❌ Раздели фильм и мнение пустой строкой")
+                        return jsonify({"status": "ok"})
+                    
+                    film_data = parse_film_text(sections[0])
+                    opinion_data = parse_opinion_text(sections[1])
+                    
+                    if not film_data['title']:
+                        send_message(chat_id, "❌ Не удалось распознать название фильма")
+                        return jsonify({"status": "ok"})
+                    
+                    if not opinion_data['opinion']:
+                        send_message(chat_id, "❌ Не удалось распознать мнение о фильме")
+                        return jsonify({"status": "ok"})
+                    
+                    blocks = split_opinion_with_ai(opinion_data["opinion"])
+                    
+                    response = f"🐕 <b>Карточки для фильма: {film_data['title']}</b>\n\n"
+                    
+                    # Информация о фильме
+                    response += "📋 <b>Информация о фильме:</b>\n"
+                    response += f"🎬 Название: {film_data['title']}\n"
+                    if film_data['year']:
+                        response += f"📅 Год: {film_data['year']}\n"
+                    if film_data['country']:
+                        response += f"🌍 Страна: {film_data['country']}\n"
+                    if film_data['director']:
+                        response += f"🎭 Режиссёр: {film_data['director']}\n"
+                    if film_data['actors']:
+                        response += f"👥 Актеры: {film_data['actors']}\n"
+                    
+                    response += "\n📝 <b>Слайды:</b>\n"
+                    
+                    titles = ["О чём лай?", "Какая атмосфера?", "Какая игра?", "Что зарыто?", "Какой вердикт?"]
+                    for i, block in enumerate(blocks):
+                        response += f"\n<b>{i+1}. {titles[i]}</b>\n{block}\n"
+                    
+                    response += f"\n⭐ <b>Оценка:</b> {opinion_data['rating']}/10"
+                    
+                    if opinion_data['hashtags']:
+                        response += f"\n🏷️ <b>Настроение:</b> {' '.join(opinion_data['hashtags'])}"
+                    
+                    if opinion_data['atmosphere_hashtags']:
+                        response += f"\n🌄 <b>Атмосфера:</b> {' '.join(opinion_data['atmosphere_hashtags'])}"
+                    
+                    # Отправляем результат
+                    send_message(chat_id, response, parse_mode='HTML')
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка: {e}")
+                    send_message(chat_id, f"❌ Ошибка: {str(e)}")
         
-        if not film_data['title']:
-            await update.message.reply_text("❌ Не удалось распознать название фильма")
-            return
-        
-        if not opinion_data['opinion']:
-            await update.message.reply_text("❌ Не удалось распознать мнение о фильме")
-            return
-        
-        blocks = split_opinion_with_ai(opinion_data["opinion"])
-        
-        response = f"🐕 <b>Карточки для фильма: {film_data['title']}</b>\n\n"
-        
-        # Информация о фильме
-        response += "📋 <b>Информация о фильме:</b>\n"
-        response += f"🎬 Название: {film_data['title']}\n"
-        if film_data['year']:
-            response += f"📅 Год: {film_data['year']}\n"
-        if film_data['country']:
-            response += f"🌍 Страна: {film_data['country']}\n"
-        if film_data['director']:
-            response += f"🎭 Режиссёр: {film_data['director']}\n"
-        if film_data['actors']:
-            response += f"👥 Актеры: {film_data['actors']}\n"
-        
-        response += "\n📝 <b>Слайды:</b>\n"
-        
-        titles = ["О чём лай?", "Какая атмосфера?", "Какая игра?", "Что зарыто?", "Какой вердикт?"]
-        for i, block in enumerate(blocks):
-            response += f"\n<b>{i+1}. {titles[i]}</b>\n{block}\n"
-        
-        response += f"\n⭐ <b>Оценка:</b> {opinion_data['rating']}/10"
-        
-        if opinion_data['hashtags']:
-            response += f"\n🏷️ <b>Настроение:</b> {' '.join(opinion_data['hashtags'])}"
-        
-        if opinion_data['atmosphere_hashtags']:
-            response += f"\n🌄 <b>Атмосфера:</b> {' '.join(opinion_data['atmosphere_hashtags'])}"
-        
-        # Отправляем результат (разбиваем если длинный)
-        if len(response) > 4000:
-            for i in range(0, len(response), 4000):
-                await update.message.reply_text(response[i:i+4000], parse_mode='HTML')
-        else:
-            await update.message.reply_text(response, parse_mode='HTML')
+        return jsonify({"status": "ok"})
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"status": "error"}), 500
 
-# ==================== ЗАПУСК ====================
+def send_message(chat_id, text, parse_mode=None):
+    """Отправка сообщения через Telegram API"""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    
+    try:
+        response = requests.post(url, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
+        return None
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("generate", generate))
+@app.route('/')
+def index():
+    return "🐕 КиноИщейка бот работает!"
 
-print("🚀 Бот запущен!")
-print(f"Разрешенный пользователь: {ALLOWED_USER_ID}")
-print("=" * 40)
-app.run_polling()
+if __name__ == '__main__':
+    print("🐕 КиноИщейка - генератор карточек")
+    print("=" * 40)
+    print(f"Токен: {TOKEN[:10]}...")
+    print(f"API URL: {OPENAI_BASE_URL}")
+    print("=" * 40)
+    
+    # Запускаем Flask сервер
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
