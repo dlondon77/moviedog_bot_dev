@@ -1,13 +1,13 @@
-# bot.py
+# bot.py - исправленная версия с устранением предупреждения
+
 import os
 import re
 import json
 import base64
 import httpx
 import requests
-import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler, ConversationHandler
 from telegram.request import HTTPXRequest
 
 # ==================== ПАТЧ ДЛЯ ПРОКСИ ====================
@@ -39,10 +39,13 @@ os.makedirs(FRAMES_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+# ПУТЬ К CHROMIUM (для btohost)
+CHROMIUM_PATH = '/root/.cache/ms-playwright/chromium-1084/chrome-linux/chrome'
+
 # ==================== СОСТОЯНИЯ ====================
 WAITING_FOR_FILM, WAITING_FOR_OPINION, WAITING_FOR_FRAMES = range(3)
-
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # ==================== ФУНКЦИИ ====================
 
@@ -209,12 +212,14 @@ def generate_card_html(frame_path, film_data, slide_title, slide_text, rating, h
 # ==================== АСИНХРОННАЯ КОНВЕРТАЦИЯ ====================
 
 async def html_to_image_async(html_content, output_path):
-    """Асинхронная конвертация HTML в изображение"""
     try:
         from playwright.async_api import async_playwright
         
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path=CHROMIUM_PATH
+            )
             page = await browser.new_page(viewport={'width': 1080, 'height': 1080})
             await page.set_content(html_content)
             await page.wait_for_timeout(1000)
@@ -331,6 +336,7 @@ async def handle_frame(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             slide_titles = ["О чём лай?", "Какая атмосфера?", "Какая игра?", "Что зарыто?", "Какой вердикт?"]
+            output_paths = []
             
             for i in range(5):
                 html = generate_card_html(
@@ -347,22 +353,33 @@ async def handle_frame(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 
                 output_path = os.path.join(OUTPUT_DIR, f"card_{i+1}.png")
-                
-                # Используем АСИНХРОННУЮ версию
                 success = await html_to_image_async(html, output_path)
                 
                 if success:
-                    with open(output_path, 'rb') as f:
-                        await update.message.reply_photo(f, caption=f"Слайд {i+1}: {slide_titles[i]}")
-                    os.remove(output_path)
+                    output_paths.append(output_path)
                 else:
                     await update.message.reply_text(f"❌ Ошибка при генерации слайда {i+1}")
+            
+            if output_paths:
+                media_group = []
+                for i, path in enumerate(output_paths):
+                    with open(path, 'rb') as f:
+                        media_group.append(
+                            InputMediaPhoto(
+                                media=f,
+                                caption=f"Слайд {i+1}: {slide_titles[i]}" if i == 0 else None
+                            )
+                        )
+                    os.remove(path)
+                
+                await update.message.reply_media_group(media_group)
+                await update.message.reply_text("🎉 Готово! Нажми /start чтобы начать заново")
+            else:
+                await update.message.reply_text("❌ Не удалось сгенерировать ни одной карточки")
             
             for path in frame_paths:
                 if os.path.exists(path):
                     os.remove(path)
-            
-            await update.message.reply_text("🎉 Готово! Все 5 карточек созданы!\nНажми /start чтобы начать заново")
             
             context.user_data.clear()
             
