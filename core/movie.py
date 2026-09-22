@@ -10,7 +10,7 @@ logger = logging.getLogger('core.movie')
 # ==================== ПОИСК ФИЛЬМОВ ====================
 
 def search_movies_in_db(query: str, min_rating: float = 0.0, max_rating: float = 10.0) -> list:
-    """Надежный поиск фильмов по названию"""
+    """Надежный поиск фильмов по названию (включая фильмы без рейтинга)"""
     conn = db.get_movies_db_connection()
     try:
         query_clean = db.clean_text(query, for_sql=True).strip()
@@ -28,12 +28,12 @@ def search_movies_in_db(query: str, min_rating: float = 0.0, max_rating: float =
         word_variants = []
         for word in words:
             variants = [
-                word,                  # оригинальный регистр
-                word.lower(),          # все маленькие
-                word.capitalize(),     # первая заглавная
-                word.upper()           # все заглавные
+                word,
+                word.lower(),
+                word.capitalize(),
+                word.upper()
             ]
-            word_variants.append(list(set(variants)))  # удаляем дубликаты
+            word_variants.append(list(set(variants)))
 
         # Генерируем все возможные комбинации вариантов слов
         from itertools import product
@@ -43,37 +43,30 @@ def search_movies_in_db(query: str, min_rating: float = 0.0, max_rating: float =
         variants = []
         for qv in query_variants:
             variants.extend([
-                f"{qv}%",       # начинается с запроса
-                f"%{qv}%",      # содержит запрос где-то внутри
+                f"{qv}%",
+                f"%{qv}%",
             ])
 
-        # Удаляем дубликаты
         variants = list(set(variants))
 
-        # Формируем SQL-запрос с приоритетом для начинающихся с запроса
+        # ⚠️ ИЗМЕНЕНО: добавлено OR rating IS NULL — фильмы без рейтинга тоже находятся
         sql = """
         SELECT id FROM movies
         WHERE (
-            -- Варианты, где название начинается с запроса (высший приоритет)
             """ + " OR ".join([f"(name LIKE ? COLLATE NOCASE)"] * len(variants)) + """
         )
-        AND rating BETWEEN ? AND ?
+        AND (rating BETWEEN ? AND ? OR rating IS NULL)
         ORDER BY
             CASE
-                -- Максимальный приоритет: точное совпадение
                 WHEN name = ? THEN 0
-                -- Высокий приоритет: начинается с запроса
                 """ + "\n".join([f"WHEN name LIKE ? COLLATE NOCASE THEN {i+1}" 
                                for i in range(len(variants))]) + """
-                -- Низкий приоритет: содержит запрос
                 ELSE """ + str(len(variants)+1) + """
             END,
-            -- Внутри каждой группы сортируем по рейтингу
             rating DESC
         LIMIT 100
         """
 
-        # Подготавливаем параметры для запроса
         exact_match = query_clean
         params = variants + [min_rating, max_rating, exact_match] + variants
 
@@ -102,24 +95,20 @@ def search_movies_by_person_in_db(query: str, min_rating: float = 0.0, max_ratin
         
         # Формируем условия поиска в зависимости от количества слов
         if len(search_terms) == 1:
-            # Поиск по одному слову - ищем в любом месте имени
             term = search_terms[0]
             patterns = [
-                f"%{term.capitalize()}%",  # Ищем слово с заглавной буквы в любом месте
+                f"%{term.capitalize()}%",
             ]
         else:
-            # Поиск по нескольким словам - учитываем последовательность
             first_terms = [t.capitalize() for t in search_terms[:-1]]
             last_term = search_terms[-1].capitalize()
             
-            # Шаблоны для поиска:
             patterns = [
-                ' '.join(first_terms + [last_term]) + '%',  # "Мэрил Стр%"
-                ' '.join(first_terms) + ' %' + last_term + '%',  # "Мэрил %Стр%"
-                '% ' + ' '.join(first_terms) + ' %' + last_term + '%',  # "% Мэрил %Стр%"
+                ' '.join(first_terms + [last_term]) + '%',
+                ' '.join(first_terms) + ' %' + last_term + '%',
+                '% ' + ' '.join(first_terms) + ' %' + last_term + '%',
             ]
         
-        # Ищем персон, соответствующих шаблонам
         return search_person_matches(patterns, min_rating, max_rating)
         
     except Exception as e:
@@ -130,7 +119,7 @@ def search_movies_by_person_in_db(query: str, min_rating: float = 0.0, max_ratin
 
 
 def search_person_matches(patterns: list, min_rating: float, max_rating: float) -> list:
-    """Поиск персон по заданным шаблонам"""
+    """Поиск персон по заданным шаблонам (включая фильмы без рейтинга)"""
     conn = db.get_movies_db_connection()
     try:
         # Создаем условия для поиска по актерам и режиссерам
@@ -159,11 +148,12 @@ def search_person_matches(patterns: list, min_rating: float, max_rating: float) 
         
         where_clause = " OR ".join(conditions) if conditions else "1=0"
         
+        # ⚠️ ИЗМЕНЕНО: добавлено OR m.rating IS NULL
         sql = f"""
         SELECT DISTINCT m.id 
         FROM movies m
         WHERE ({where_clause})
-        AND m.rating BETWEEN ? AND ?
+        AND (m.rating BETWEEN ? AND ? OR m.rating IS NULL)
         ORDER BY m.rating DESC
         LIMIT 100
         """
@@ -239,10 +229,10 @@ def get_random_movie_from_db(min_rating: float = 7.0, max_rating: float = 10.0, 
         use_new_releases = random.random() < 0.2
         
         if use_new_releases:
-            # Пробуем найти новинки с рейтингом 5-7
+            # ⚠️ ИЗМЕНЕНО: добавлено OR rating IS NULL — новинки без рейтинга тоже попадают
             sql = """
             SELECT id FROM movies 
-            WHERE rating >= 5 AND rating <= 7
+            WHERE (rating >= 5 AND rating <= 7 OR rating IS NULL)
             AND is_new_release = 1
             ORDER BY RANDOM() LIMIT 1
             """
@@ -280,24 +270,35 @@ def get_random_movie_from_db(min_rating: float = 7.0, max_rating: float = 10.0, 
 
 
 def get_premier_movies_from_db() -> list:
-    """Получение списка премьерных фильмов за последний месяц и будущих"""
+    """
+    Получение списка премьерных фильмов.
+    Логика: фильмы с is_new_release = 1, у которых:
+      - premiere_russia >= начало прошлого месяца, ИЛИ
+      - premiere_world >= начало прошлого месяца.
+    То есть: с начала прошлого месяца и все будущие.
+    Фильмы без обеих премьер — не показываем.
+    """
     conn = db.get_movies_db_connection()
     cursor = conn.cursor()
     
     try:
-        one_month_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        # ⚠️ ИЗМЕНЕНО: порог — начало прошлого месяца (было 7 дней назад)
+        today = datetime.now()
+        first_of_this_month = today.replace(day=1)
+        first_of_last_month = (first_of_this_month - timedelta(days=1)).replace(day=1)
+        date_threshold = first_of_last_month.strftime("%Y-%m-%d")
         
         # Получаем только ID фильмов
         sql = """
         SELECT id FROM movies 
-        WHERE is_new_release = 1 AND 
-            (premiere_russia >= ? OR premiere_world >= ?)
+        WHERE is_new_release = 1 
+          AND (premiere_russia >= ? OR premiere_world >= ?)
         ORDER BY 
             COALESCE(premiere_russia, premiere_world) ASC,
             await_count DESC
         LIMIT 100
         """
-        cursor.execute(sql, (one_month_ago, one_month_ago))
+        cursor.execute(sql, (date_threshold, date_threshold))
         movie_ids = [row[0] for row in cursor.fetchall()]
         
         # Получаем полные данные для каждого фильма
@@ -313,6 +314,7 @@ def get_premier_movies_from_db() -> list:
         return []
     finally:
         conn.close()
+
 
 def format_movie_card(movie, is_premiers=False, query=None, is_person_search=False):
     """Форматирует карточку фильма для отправки пользователю"""
@@ -425,6 +427,7 @@ def format_movie_card(movie, is_premiers=False, query=None, is_person_search=Fal
         logger.error(f"Ошибка форматирования карточки фильма: {e}")
         return None, None
 
+
 def search_movies_with_filters(query, filters=None, count_only=False):
     """
     Поиск фильмов с фильтрами, используя существующий search_movies_in_db
@@ -500,7 +503,8 @@ def search_movies_with_filters(query, filters=None, count_only=False):
         return (len(filtered_movies), has_more)
     else:
         return filtered_movies
-        
+
+
 def format_filter_keyboard(query, current_filters=None, total_count=0, has_more=False):
     """
     Создает клавиатуру с фильтрами для поиска
